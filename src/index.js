@@ -1085,7 +1085,7 @@ class Viewer {
 
     connect(url) {
         if (url === undefined) {
-            url = `ws://${location.host}`;
+            url = `ws://${location.host}${location.pathname.replace(/static\/$/, "")}`;
         }
         if (location.protocol == "https:") {
             url = url.replace("ws:", "wss:");
