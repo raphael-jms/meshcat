@@ -1,13 +1,124 @@
-var THREE = require('three');
-var msgpack = require('msgpack-lite');
+import * as THREE from 'three';
+var msgpack = require('@msgpack/msgpack');
 var dat = require('dat.gui').default; // TODO: why is .default needed?
-import {mergeBufferGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {OBJLoader2, MtlObjBridge} from 'wwobjloader2'
 import {ColladaLoader} from 'three/examples/jsm/loaders/ColladaLoader.js';
+import {DRACOLoader} from 'three/examples/jsm/loaders/DRACOLoader.js';
+import {GLTFLoader} from 'three/examples/jsm/loaders/GLTFLoader.js';
+import {KTX2Loader} from 'three/examples/jsm/loaders/KTX2Loader.js';
 import {MTLLoader} from 'three/examples/jsm/loaders/MTLLoader.js';
+import {RGBELoader} from 'three/examples/jsm/loaders/RGBELoader.js';
 import {STLLoader} from 'three/examples/jsm/loaders/STLLoader.js';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
+import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
+import { XRButton } from 'three/examples/jsm/webxr/XRButton.js';
+import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerModelFactory';
+import {Line2} from 'three/examples/jsm/lines/Line2.js';
+import {LineMaterial} from 'three/examples/jsm/lines/LineMaterial.js';
+import {LineGeometry} from 'three/examples/jsm/lines/LineGeometry.js';
+import Stats from 'three/examples/jsm/libs/stats.module.js';
 require('ccapture.js');
+
+// These are bundled as data:// URIs via our webpack.config.js.
+const meshcat_inline_assets = {
+    'basis_transcoder.js': new URL(
+        'three/examples/jsm/libs/basis/basis_transcoder.js',
+        import.meta.url).href,
+    'basis_transcoder.wasm': new URL(
+        'three/examples/jsm/libs/basis/basis_transcoder.wasm',
+        import.meta.url).href,
+    'draco_decoder.wasm': new URL(
+        'three/examples/jsm/libs/draco/gltf/draco_decoder.wasm',
+        import.meta.url).href,
+    'draco_wasm_wrapper.js': new URL(
+        'three/examples/jsm/libs/draco/gltf/draco_wasm_wrapper.js',
+        import.meta.url).href,
+};
+const meshcat_loading_manager = new THREE.LoadingManager();
+meshcat_loading_manager.setURLModifier(url => {
+    if (url in meshcat_inline_assets) {
+        return meshcat_inline_assets[url];
+    }
+    return MeshCat.THREE.DefaultLoadingManager.resolveURL(url);
+});
+
+// We implement several MessagePack extension types for arrays, inspired by the
+// conventions for msgpack-lite:
+//    https://github.com/kawanet/msgpack-lite/tree/master#extension-types
+//
+// Specifically, we support:
+// - 0x12 Uint8Array
+// - 0x15 Int32Array
+// - 0x16 Uint32Array
+// - 0x17 Float32Array
+//
+// The trick to decoding them is they must be converted from littleEndian.
+const extensionCodec = new msgpack.ExtensionCodec();
+// Uint8Array
+extensionCodec.register({
+  type: 0x12,
+  encode: (obj) => {
+    console.error("Uint8Array encode not implemented")
+    return null;
+  },
+  decode: (data) => {
+    const to_return = new Uint8Array(data.byteLength);
+    let dataview = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    for (let i = 0; i < to_return.length; i++) {
+      to_return[i] = dataview.getUint8(i);
+    }
+    return to_return
+  },
+});
+// Int32Array
+extensionCodec.register({
+  type: 0x15,
+  encode: (obj) => {
+    console.error("Int32Array encode not implemented")
+    return null;
+  },
+  decode: (data) => {
+    const to_return = new Int32Array(data.byteLength / 4);
+    let dataview = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    for (let i = 0; i < to_return.length; i++) {
+      to_return[i] = dataview.getInt32(i * 4, true);  // true b.c. littleEndian
+    }
+    return to_return
+  },
+});
+// Uint32Array
+extensionCodec.register({
+  type: 0x16,
+  encode: (obj) => {
+    console.error("Uint32Array encode not implemented")
+    return null;
+  },
+  decode: (data) => {
+    const to_return = new Uint32Array(data.byteLength / 4);
+    let dataview = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    for (let i = 0; i < to_return.length; i++) {
+      to_return[i] = dataview.getUint32(i * 4, true);  // true b.c. littleEndian
+    }
+    return to_return
+  },
+});
+// Float32Array
+extensionCodec.register({
+  type: 0x17,
+  encode: (obj) => {
+    console.error("Float32Array encode not implemented")
+    return null;
+  },
+  decode: (data) => {
+    const to_return = new Float32Array(data.byteLength / 4);
+    let dataview = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    for (let i = 0; i < to_return.length; i++) {
+      to_return[i] = dataview.getFloat32(i * 4, true);  // true b.c. littleEndian
+    }
+    return to_return
+  },
+});
 
 // Merges a hierarchy of collada mesh geometries into a single
 // `BufferGeometry` object:
@@ -36,7 +147,7 @@ function merge_geometries(object, preserve_materials = false) {
             result.material = materials[0];
         }
     } else if (geometries.length > 1) {
-        result = mergeBufferGeometries(geometries, true);
+        result = mergeGeometries(geometries, true);
         if (preserve_materials) {
             result.material = materials;
         }
@@ -88,6 +199,19 @@ function handle_special_geometry(geom) {
         console.warn("_meshfile is deprecated. Please use _meshfile_geometry for geometries and _meshfile_object for objects with geometry and material");
         geom.type = "_meshfile_geometry";
     }
+    if (geom.type == "LineGeometry") {
+        let geometry = new LineGeometry();
+        geometry.uuid = geom.uuid;
+        if (geom.position) {
+            let positions = geom.position.array;
+            geometry.setPositions(positions);
+        }
+        if (geom.color) {
+            let colors = geom.color.array;
+            geometry.setColors(colors);
+        }
+        return geometry;
+    }
     if (geom.type == "_meshfile_geometry") {
         if (geom.format == "obj") {
             let loader = new OBJLoader2();
@@ -110,6 +234,17 @@ function handle_special_geometry(geom) {
             console.error("Unsupported mesh type:", geom);
             return null;
         }
+    }
+    return null;
+}
+
+// Handler for special material types that we want to support
+// in addition to whatever three.js supports.
+function handle_special_material(mat) {
+    if (mat.type == "LineMaterial") {
+        let material = new LineMaterial(mat);
+        material.uuid = mat.uuid;
+        return material;
     }
     return null;
 }
@@ -151,6 +286,12 @@ class ExtensibleObjectLoader extends THREE.ObjectLoader {
                              json, images);
     }
 
+    parseMaterials(json, textures) {
+        return this.delegate(handle_special_material,
+                             super.parseMaterials,
+                             json, textures);
+    }
+
     parseGeometries(json, shapes) {
         return this.delegate(handle_special_geometry,
                              super.parseGeometries,
@@ -158,7 +299,30 @@ class ExtensibleObjectLoader extends THREE.ObjectLoader {
     }
 
     parseObject(json, geometries, materials) {
-        if (json.type == "_meshfile_object") {
+        if (json.type == "Line2") {
+            // Handle Line2 (fat lines with configurable width)
+            // Geometry and material have already been parsed by special handlers
+            let geometry = geometries[json.geometry];
+            let material = materials[json.material];
+
+            // Create Line2 object using the already-parsed geometry and material
+            let object = new Line2(geometry, material);
+            object.uuid = json.uuid;
+
+            if (json.name !== undefined) object.name = json.name;
+            if (json.matrix !== undefined) {
+                object.matrix.fromArray(json.matrix);
+                if (json.matrixAutoUpdate !== undefined) object.matrixAutoUpdate = json.matrixAutoUpdate;
+                if (object.matrixAutoUpdate) object.matrix.decompose(object.position, object.quaternion, object.scale);
+            }
+            if (json.visible !== undefined) object.visible = json.visible;
+
+            // Compute line distances for dashed line support
+            // This must be called on the Line2 object, not the geometry
+            object.computeLineDistances();
+
+            return object;
+        } else if (json.type == "_meshfile_object") {
             let geometry;
             let material;
             let manager = new THREE.LoadingManager();
@@ -246,6 +410,173 @@ class ExtensibleObjectLoader extends THREE.ObjectLoader {
     }
 }
 
+// This provides the ability to edit rendering settings and see the effect in
+// the viewer.
+class RenderConfig extends THREE.Object3D {
+    constructor() {
+        super();
+        this.isRenderConfig = true;
+        this.type = 'RenderConfig';
+
+        this.exposure = 1.0;
+        // TODO(SeanCurtis-TRI): Consider other settings such as clipping plane.
+    }
+
+    on_update() {
+        // RenderConfig isn't a three.js object. It has no mechanism whereby
+        // setting a value will automatically trigger a re-render. When we call
+        // set_property() on the containing SceneNode, we need to trigger a
+        // re-render. SceneNode.set_property() calls this function, to indicate
+        // that something has changed. We rely on the SceneNode to have set up
+        // the appropriate callback to trigger a re-render.
+    }
+}
+
+class Background extends THREE.Object3D {
+    constructor() {
+        super();
+        this.isBackground = true;
+        this.type = 'Background';
+
+        // The controllable properties that can be set either via control or
+        // set_property().
+        this.top_color = new dat.color.Color(135, 206, 250);  // lightskyblue
+        this.bottom_color = new dat.color.Color(25, 25, 112);  // midnightlblue
+        this.render_environment_map = true;
+        this.environment_map = null;
+        this.visible = true;
+        this.is_perspective = true;
+        this.use_ar_background = false;
+
+        // The textures associated with the background: either the map, the
+        // gradient, or a white texture (for when the background isn't visible).
+        this.textures = {
+            "env_map": null,  // no default environment.
+            "round": {
+                "gradient": make_gradient_texture(this.top_color, this.bottom_color, true),
+                "white": make_gradient_texture([255, 255, 255], [255, 255, 255], true)
+            },
+            "flat": {
+                "gradient": make_gradient_texture(this.top_color, this.bottom_color, false),
+                "white": make_gradient_texture([255, 255, 255], [255, 255, 255], false)
+            }
+        };
+        // The state values that contributed to the current values of
+        // scene.background and scene.environment. When the controllable
+        // properties get twiddled, this state will be compared with that state
+        // to determine the work necessary to update the background.
+        this.state = {
+            "top_color": null,
+            "bottom_color": null,
+            "environment_map": null,
+            "render_map": null,
+            "visible": true,
+            "is_perspective": true
+        };
+    }
+
+    // Configures this background's state and the scene with the given,
+    // successfully-loaded texture. Note: this won't necessarily lead to a
+    // visible change, if, for example, the background is not visible. This
+    // should only be called asynchronously if a texture has been successfully
+    // loaded.
+    // url and texture can both be null, clearing the environment texture. Both
+    // must be null or non-null.
+    set_environment_texture(url, texture, scene) {
+        this.environment_map = url;
+        this.state.environment_map = url;
+        this.textures.env_map = texture;
+        this._configure_environment_map_from_state(scene);
+    }
+
+    // Configures the scene's background and environment based on this's state.
+    _configure_environment_map_from_state(scene) {
+        let cam_key = this.state.is_perspective ? "round" : "flat";
+        // A visible background is either the environment map or the gradient.
+        // To be the map, the map must be defined, state.render_map is true,
+        // and the camera is perspective. Otherwise gradient.
+        // In immersive AR mode, we need the background to be transparent (so
+        // that the camera comes through). So, we set the background to null,
+        // but leave the normal semantics for environment so objects get
+        // _illuminated_ the same.
+        scene.background =
+            this.use_ar_background ?
+                null :
+                this.state.visible ?
+                    (this.state.render_map &&
+                        this.textures.env_map !== null &&
+                        this.state.is_perspective ?
+                            this.textures.env_map :
+                            this.textures[cam_key].gradient) :
+                    this.textures[cam_key].white;
+        // The environment is either a white ambient cloud, the specified
+        // gradient, or an environment map.
+        scene.environment =
+            this.state.visible ?
+                (this.textures.env_map != null ?
+                    this.textures.env_map :
+                    this.textures.round.gradient) :
+                this.textures.round.white;
+    }
+
+    // Do all the synchronous work to update the background *state* from the
+    // background requests and, finally, conditionally kick off the asynchronous
+    // work of loading a new environment map texture. The "requests" are
+    // captured in this object's members (they get affected by controls and
+    // set_property() commands). In response to changes, this gets called so
+    // that the most current configurations can get pushed down into the state
+    // that reflects what the actual THREE.js scene contains.
+    //
+    // This may lead to work without visible effect. For example, if the
+    // background is "not visible" (via the controls), but a new environment
+    // map URL is specified; we'll load the environment map, but it won't show
+    // until the background is made visible again.
+    update(scene, is_visible, is_perspective, on_background_done) {
+        // Update gradient textures if colors have been changed.
+        if (this.top_color !== this.state.top_color ||
+            this.bottom_color !== this.state.bottom_color) {
+            this.state.top_color = this.top_color;
+            this.state.bottom_color = this.bottom_color;
+            let t = [this.state.top_color.r, this.state.top_color.g,
+                     this.state.top_color.b];
+            let b = [this.state.bottom_color.r, this.state.bottom_color.g,
+                     this.state.bottom_color.b];
+            this.textures.flat.gradient = make_gradient_texture(t, b, false);
+            this.textures.round.gradient = make_gradient_texture(t, b, true);
+        }
+
+        // Update rendering state.
+        this.state.render_map = this.render_environment_map;
+        this.state.use_ar_background = this.use_ar_background;
+        this.state.visible = is_visible;
+        this.state.is_perspective = is_perspective;
+        // Note: this.state.environment_map will only change if we attempt to
+        // load a new environment texture (see below).
+
+        let non_empty = (obj) => {
+            return typeof obj === 'string' && obj.length > 0;
+        };
+        let requested_environment_map = non_empty(this.environment_map);
+
+        if (this.environment_map != this.state.environment_map) {
+            if (requested_environment_map) {
+                load_env_texture(this, scene, on_background_done);
+                // Note: load_env_texture will eventually end with a call to
+                // on_background_done(). We shouldn't call it here.
+            } else {
+                this.set_environment_texture(/* url= */ null,
+                                             /* texture= */ null, scene);
+                on_background_done();
+            }
+            return;
+        }
+
+        // If we've made it this far, we'll reconfigure based on the current
+        // state to catch all other possible configuration changes.
+        this._configure_environment_map_from_state(scene);
+        on_background_done();
+    }
+}
 
 class SceneNode {
     constructor(object, folder, on_update) {
@@ -254,6 +585,9 @@ class SceneNode {
         this.children = {};
         this.controllers = [];
         this.on_update = on_update;
+        // Non-null only for auto-created <object> placeholders. The node
+        // stores properties to replay when the real object materializes.
+        this.pending_properties = null;
         this.create_controls();
         for (let c of this.object.children) {
             this.add_child(c);
@@ -291,6 +625,7 @@ class SceneNode {
         for (let c of this.controllers) {
             this.folder.remove(c);
         }
+        this.controllers = [];
         if (this.vis_controller !== undefined) {
             this.folder.domElement.removeChild(this.vis_controller.domElement);
         }
@@ -308,7 +643,8 @@ class SceneNode {
             }
         });
         if (this.object.isLight) {
-            let intensity_controller = this.folder.add(this.object, "intensity").min(0).step(0.01);
+            let intensity_controller = this.folder.add(this.object, "intensity")
+                .min(0).step(0.01).name("intensity (cd)");
             intensity_controller.onChange(() => this.on_update());
             this.controllers.push(intensity_controller);
             if (this.object.castShadow !== undefined){
@@ -338,41 +674,213 @@ class SceneNode {
             });
             this.controllers.push(controller);
         }
+        if (this.object.isEnvironment) {
+            let intensity_controller = this.folder.add(this.object, "intensity").min(0).step(0.1).max(100);
+            intensity_controller.onChange(() => this.on_update());
+            this.controllers.push(intensity_controller);
+        }
+        if (this.object.isBackground) {
+            // Changing the background gradient is cheap, so we'll change the
+            // color in the onChange() callback (instead of the onChangeFinished)
+            // callback -- it makes a more interactive experience.
+            let top_controller = this.folder.addColor(this.object, "top_color")
+                .name("Top color");
+            top_controller.onChange(() => this.on_update());
+            this.controllers.push(top_controller);
+
+            let bottom_controller = this.folder.addColor(this.object, "bottom_color")
+                .name("Bottom color");
+            bottom_controller.onChange(() => this.on_update());
+            this.controllers.push(bottom_controller);
+
+            let map_controller = this.folder.add(this.object, "render_environment_map")
+                .name("Show environment map");
+            map_controller.onChange(() => this.on_update());
+            this.controllers.push(map_controller);
+        }
+        if (this.object.isRenderConfig) {
+            let exposure_controller = this.folder.add(this.object, "exposure").min(0).step(0.01).name("Exposure");;
+            exposure_controller.onChange(() => this.on_update());
+            this.controllers.push(exposure_controller);;
+        }
     }
 
-    set_property(property, value) {
+    // To *modulate* opacity, we need to store the baseline value. This should
+    // be called before the "opacity" property of a Material is written to.
+    cache_original_opacity(material) {
+        if (material.meshcat_base_opacity === undefined) {
+            material.meshcat_base_opacity = material.opacity;
+        }
+    }
+
+    // Changing opacity involves coordinating multiple properties.
+    set_opacity(material, opacity) {
+        this.cache_original_opacity(material);
+        material.opacity = opacity;
+        material.transparent = opacity < 1;
+        material.depthWrite = true;
+        // Transparency changes may require changes to the compiled shaders.
+        // Setting needsUpdate will trigger that. See
+        // https://github.com/mrdoob/three.js/issues/25307#issuecomment-1398151913
+        material.needsUpdate = true;
+    }
+
+    // Visits all the materials in the graph rooted at node (including if node
+    // is, itself, a material). For each material, applies the mat_operator
+    // to that material. If no materials are currently realized under `node`
+    // (e.g., while waiting for a future <object> to be set), this is a no-op.
+    visit_materials(node, mat_operator) {
+        if (node.isMaterial) {
+            mat_operator(node);
+        } else if (node.material) {
+            if (Array.isArray(node.material)) {
+                for (let material of node.material) {
+                    mat_operator(material);
+                }
+            } else {
+                mat_operator(node.material);
+            }
+        }
+        for (let child of node.children) {
+            this.visit_materials(child, mat_operator);
+        }
+    }
+
+    set_property(property, value, target_path) {
+        // Crawl properties should be specified on the _container_ node.
+        // However, the implementation must place properties on the _renderable_
+        // node (.../<object>); we'll retarget the property if necessary.
+        if ((property === "crawl_axis" || property === "crawl_displacement") &&
+                (target_path[target_path.length - 1] !== "<object>")) {
+            var new_target = this.find(["<object>"]);
+            var new_target_path = target_path.concat(["<object>"]);
+            new_target.set_property(property, value, new_target_path);
+            return;
+        }
+        // Two-phase behavior:
+        //   1) Apply to whatever portion of the subtree is already realized.
+        //   2) If this is an auto-created <object> placeholder, queue this
+        //      command so set_object() replay applies it to the real object.
         if (property === "position") {
             this.object.position.set(value[0], value[1], value[2]);
         } else if (property === "quaternion") {
             this.object.quaternion.set(value[0], value[1], value[2], value[3]);
         } else if (property === "scale") {
             this.object.scale.set(value[0], value[1], value[2]);
+        } else if (property === "crawl_axis") {
+            const axis_C = new THREE.Vector3(value[0], value[1], value[2]);
+            // Prepares the subtree, propagating the axis expressed in the
+            // geometry's container frame to each mesh's local frame.
+            prepare_crawling_texture(this.object);
+            // The pose of the renderable R in its parent container frame C.
+            let X_CR = new THREE.Matrix4();
+            X_CR.copy(get_current_local_matrix(this.object));
+            let R_CR = new THREE.Matrix3().setFromMatrix4(X_CR);
+            // Note: crawl_axis is axis_C by definition.
+            set_crawl_axis_for_subtree(this.object, axis_C, R_CR);
+            this.on_update();
+        } else if (property === "crawl_displacement") {
+            this.visit_materials(this.object, (mat) => {
+                mat.meshcat_crawl_displacement = value;
+            });
+            this.on_update();
         } else if (property === "color") {
-            function setNodeColor(node, value) {
-                if (node.material) {
-                    node.material.color.setRGB(value[0], value[1], value[2])
-
-                    let alpha = value[3]
-                    node.material.opacity = alpha 
-                    if(alpha != 1.) {
-                       node.material.transparent = true
-                    } 
-                    else {
-                        node.material.transparent = false
-                    }
-                }
-                for (let child of node.children) {
-                    setNodeColor(child, value);
-                }
-            }
-            setNodeColor(this.object, value)
+            var _this = this;
+            function setNodeColor(mat) {
+                mat.color.setRGB(value[0], value[1], value[2]);
+                _this.set_opacity(mat, value[3]);
+            };
+            this.visit_materials(this.object, setNodeColor);
+        } else if (property == "opacity") {
+            var _this = this;
+            function setNodeOpacity(mat) {
+                _this.set_opacity(mat, value);
+            };
+            this.visit_materials(this.object, setNodeOpacity);
+        } else if (property == "modulated_opacity") {
+            var _this = this;
+            function setModulatedNodeOpacity(mat) {
+                // In case set_opacity() has never been called before, we'll
+                // call cache_original_opacity() to be safe.
+                _this.cache_original_opacity(mat);
+                _this.set_opacity(mat, mat.meshcat_base_opacity * value);
+            };
+            this.visit_materials(this.object, setModulatedNodeOpacity);
         } else if (property == "top_color" || property == "bottom_color") {
-            this.object[property] = value.map((x) => x * 255);
+            // Top/bottom colors are stored as dat.color.Color
+            this.object[property] = new dat.color.Color(value.map((x) => x * 255));
         } else {
-            this.object[property] = value;
+            this.set_property_chain(property, value, target_path);
+        }
+        if (this.pending_properties !== null) {
+            this.pending_properties[property] = {value, target_path};
+        }
+        // For non three.js objects, we need to explicitly call their
+        // on_update() methods to trigger redraws.
+        if (this.object.isBackground || this.object.isRenderConfig) {
+            this.on_update();
         }
         this.vis_controller.updateDisplay();
         this.controllers.forEach(c => c.updateDisplay());
+    }
+
+    set_property_chain(property, value, target_path) {
+        // Break the property `obj0.obj1[obj2].foo` into the list
+        // `[obj0, obj1, obj2]` and the property name `foo`.
+
+        // Array [x] becomes .x.
+        property = property.replace(/\[(\w+)\]/g, '.$1');
+        // Strip a leading dot.
+        property = property.replace(/^\./, '');
+        var objects = property.split(".");
+        const final_property = objects.pop();
+
+        // Traverse the object sequence.
+
+        // For loop invariant: `parent` starts as an object (by construction)
+        // the for loop only updates it to another object.
+        var error_detail = null;
+        var parent = this.object;
+        var parent_path = this.folder.name;
+        for (const child of objects) {
+            // Loop invariant: parent is object implies this test is always safe.
+            if (child in parent) {
+                parent_path += "." + child;
+                if (typeof parent[child] === 'object') {
+                    parent = parent[child];
+                    continue;
+                }
+                error_detail = `'${parent_path}' is not an Object and has no properties`;
+            } else {
+                error_detail = `'${parent_path}' has no property '${child}'`;
+            }
+            break;
+        }
+
+        // Test the validity of the assignment of the final property value. We
+        // know that `parent` is an object.
+        if (error_detail === null && !(final_property in parent)) {
+            error_detail = `'${parent_path}' has no property '${final_property}'`;
+        }
+
+        if (error_detail != null) {
+            if (this.pending_properties !== null) {
+                // Pending properties exists; this is a placeholder. The errors
+                // we've detected may not be real errors. So, we won't yell for
+                // the placeholder. During replay, we'll try this again.
+                return;
+            }
+            // Note: full_path may not be an exact reproduction of the path
+            // passed via msgpack.
+            const full_path = "/" + target_path.join('/');
+            const value_str = JSON.stringify(value);
+            console.error(
+                `Error in set_property("${full_path}", "${property}", ${value_str})\n` +
+                `${error_detail}. The value will not be set.`);
+            return;
+        }
+
+        parent[final_property] = value;
     }
 
     set_transform(matrix) {
@@ -388,6 +896,16 @@ class SceneNode {
         this.object = object;
         parent.add(object);
         this.create_controls();
+        // Replay any properties that were set before this object materialized
+        // (e.g., during async glTF loading). This allows clients to set properties
+        // immediately without waiting for the object to load.
+        let queued_props = this.pending_properties || {};
+        // Clear queue to avoid re-queuing during replay.
+        this.pending_properties = null;
+        for (let property in queued_props) {
+            let {value, target_path} = queued_props[property];
+            this.set_property(property, value, target_path);
+        }
     }
 
     dispose_recursive() {
@@ -448,13 +966,371 @@ function dispose(object) {
     }
 }
 
+function get_current_local_matrix(object) {
+    if (object.matrixAutoUpdate) {
+        object.updateMatrix();
+    }
+    return object.matrix;
+}
+
+// Applies the crawling texture axis to all materials in a geometry subtree.
+//
+// Crawling behavior is defined by an axis `axis_R` expressed in the root
+// container frame R. We recursively associate that axis with each mesh material
+// found in the tree rooted (ultimately) at R. Each invocation works on node
+// N, a descendant of R.
+//
+// Each mesh evaluates the crawling texture in its own frame (the texture
+// Jacobians are computed in each mesh's local frame), so we need to
+// re-express the axis in each frame in turn. We accumulate the relative
+// orientation between R and node N as we traverse.
+function set_crawl_axis_for_subtree(node, axis_R, R_RN) {
+    if (node.isMesh && node.material) {
+        const R_NR = R_RN.clone().transpose();
+        // We'll normalize to be safe with 32-bit floats.
+        const axis_N = axis_R.clone().applyMatrix3(R_NR).normalize();
+        const mats = Array.isArray(node.material)
+            ? node.material
+            : [node.material];
+        for (const mat of mats) {
+            mat.meshcat_crawl_axis = axis_N.clone();
+        }
+    }
+    for (const child of node.children) {
+        let R_NC = new THREE.Matrix3();
+        R_NC.setFromMatrix4(get_current_local_matrix(child));
+        set_crawl_axis_for_subtree(child, axis_R, R_RN.clone().multiply(R_NC));
+    }
+}
+
+// Computes and stores the UV Jacobian vertex attributes required by the
+// crawling texture shader (see install_crawling_texture_shader).
+//
+// Background
+// ----------
+// The crawling texture effect works by offsetting the UV coordinates of every
+// vertex in the vertex shader. The desired offset is specified as a
+// world-space displacement distance in a direction related to the crawl axis,
+// but the shader needs the corresponding displacement in UV space. The
+// relationship between a small displacement δ in geometry (local) space and the
+// resulting UV offset (δu, δv) is given by the UV Jacobian matrix J:
+//
+//   [δu]   [JU · δ]
+//   [δv] = [JV · δ]
+//
+// where JU and JV are 3-vectors (the rows of J) representing ∂u/∂p and
+// ∂v/∂p respectively, with p a position in local geometry space.
+//
+// Derivation
+// ----------
+// For a triangle with vertices (p0, p1, p2) and corresponding UVs
+// (uv0, uv1, uv2), we want the linear map J such that:
+//
+//   uv1 - uv0 = J * (p1 - p0)
+//   uv2 - uv0 = J * (p2 - p0)
+//
+// Because J maps from 3D to 2D and the triangle is planar, J is not uniquely
+// determined — any component normal to the triangle face is unobservable.  We
+// choose the minimum-norm solution, which lives entirely in the tangent plane
+// of the triangle:
+//
+//   J = [du1, du2] * [e1^T] ^ {-1 (pseudoinverse)}
+//       [dv1, dv2]   [e2^T]
+//
+// where e1 = p1 - p0, e2 = p2 - p0, and [du/dv]i = uvi - uv0.
+//
+// The pseudoinverse of the 3×2 matrix [e1 | e2] (in least-squares sense) is:
+//
+//   [e1 | e2]^+ = (G^{-1}) [e1 | e2]^T,  G = [a b; b c],
+//                           a = e1·e1, b = e1·e2, c = e2·e2
+//
+// giving the dual basis vectors:
+//
+//   r1 = (c*e1 - b*e2) / (a*c - b^2)
+//   r2 = (a*e2 - b*e1) / (a*c - b^2)
+//
+// and thus:
+//
+//   JU = du1*r1 + du2*r2    (negated — see below)
+//   JV = dv1*r1 + dv2*r2    (negated — see below)
+//
+// The negation aligns the crawl direction convention: positive displacement
+// in the crawl direction should advance the texture in the same direction
+// (texture crawls *with* the geometry, not against it).
+//
+// Averaging
+// ---------
+// Vertices shared between triangles receive contributions from each adjacent
+// triangle.  Contributions are weighted by triangle area and then normalized,
+// yielding a smooth, area-weighted average Jacobian at each vertex.  For
+// planar (or near-planar) regions all triangles contribute the same Jacobian,
+// so the average is exact.
+//
+// UV-layout requirement
+// ---------------------
+// For the crawl speed to be spatially uniform, the UV coordinates must be
+// proportional to arc length along the crawl direction.  Specifically,
+// |JU · crawl_axis| must be the same constant across all faces.  This is a
+// property of the UV layout in the mesh, not of this function.
+//
+// Output
+// ------
+// Adds two vec3 vertex attributes to `geometry`:
+//   meshcatCrawlJacobianU  —  JU at each vertex (∂u/∂p, negated)
+//   meshcatCrawlJacobianV  —  JV at each vertex (∂v/∂p, negated)
+//
+// Returns true if the attributes were successfully computed, false if the
+// geometry lacks position or UV data.  Idempotent: a geometry that already
+// has the attributes is left unchanged.
+function compute_crawling_texture_jacobians(geometry) {
+    // Idempotent: skip if already computed for this geometry.
+    if (geometry.attributes.meshcatCrawlJacobianU !== undefined) {
+        return true;
+    }
+    let position = geometry.attributes.position;
+    let uv = geometry.attributes.uv;
+    if (position === undefined || uv === undefined) {
+        return false;
+    }
+
+    let vertex_count = position.count;
+    let accum_u = new Float32Array(vertex_count * 3);
+    let accum_v = new Float32Array(vertex_count * 3);
+    let weights = new Float32Array(vertex_count);
+
+    let index = geometry.index;
+    let triangle_count = index ? index.count / 3 : vertex_count / 3;
+
+    let get_vertex_index = (triangle_index, corner_index) => {
+        if (index) {
+            return index.getX(triangle_index * 3 + corner_index);
+        }
+        return triangle_index * 3 + corner_index;
+    };
+
+    for (let triangle_index = 0; triangle_index < triangle_count; triangle_index++) {
+        let i0 = get_vertex_index(triangle_index, 0);
+        let i1 = get_vertex_index(triangle_index, 1);
+        let i2 = get_vertex_index(triangle_index, 2);
+
+        let p0 = new THREE.Vector3().fromBufferAttribute(position, i0);
+        let p1 = new THREE.Vector3().fromBufferAttribute(position, i1);
+        let p2 = new THREE.Vector3().fromBufferAttribute(position, i2);
+        let uv0 = new THREE.Vector2().fromBufferAttribute(uv, i0);
+        let uv1 = new THREE.Vector2().fromBufferAttribute(uv, i1);
+        let uv2 = new THREE.Vector2().fromBufferAttribute(uv, i2);
+
+        let e1 = p1.clone().sub(p0);
+        let e2 = p2.clone().sub(p0);
+        let du1 = uv1.x - uv0.x;
+        let dv1 = uv1.y - uv0.y;
+        let du2 = uv2.x - uv0.x;
+        let dv2 = uv2.y - uv0.y;
+
+        let a = e1.dot(e1);
+        let b = e1.dot(e2);
+        let c = e2.dot(e2);
+        let det = a * c - b * b;
+        if (Math.abs(det) < 1e-12) {
+            continue;
+        }
+
+        let inv_det = 1.0 / det;
+        let r1 = e1.clone().multiplyScalar(c).sub(e2.clone().multiplyScalar(b)).multiplyScalar(inv_det);
+        let r2 = e2.clone().multiplyScalar(a).sub(e1.clone().multiplyScalar(b)).multiplyScalar(inv_det);
+
+        // Negate the Jacobian so that a positive displacement advances the texture
+        // in the expected direction (texture crawls with the belt, not against it).
+        let ju = r1.clone().multiplyScalar(du1).add(r2.clone().multiplyScalar(du2)).negate();
+        let jv = r1.clone().multiplyScalar(dv1).add(r2.clone().multiplyScalar(dv2)).negate();
+        let area_weight = e1.clone().cross(e2).length() * 0.5;
+        let indices = [i0, i1, i2];
+        for (let vertex_index of indices) {
+            accum_u[vertex_index * 3 + 0] += ju.x * area_weight;
+            accum_u[vertex_index * 3 + 1] += ju.y * area_weight;
+            accum_u[vertex_index * 3 + 2] += ju.z * area_weight;
+            accum_v[vertex_index * 3 + 0] += jv.x * area_weight;
+            accum_v[vertex_index * 3 + 1] += jv.y * area_weight;
+            accum_v[vertex_index * 3 + 2] += jv.z * area_weight;
+            weights[vertex_index] += area_weight;
+        }
+    }
+
+    for (let vertex_index = 0; vertex_index < vertex_count; vertex_index++) {
+        let weight = weights[vertex_index];
+        if (weight > 0) {
+            accum_u[vertex_index * 3 + 0] /= weight;
+            accum_u[vertex_index * 3 + 1] /= weight;
+            accum_u[vertex_index * 3 + 2] /= weight;
+            accum_v[vertex_index * 3 + 0] /= weight;
+            accum_v[vertex_index * 3 + 1] /= weight;
+            accum_v[vertex_index * 3 + 2] /= weight;
+        }
+    }
+
+    geometry.setAttribute("meshcatCrawlJacobianU", new THREE.BufferAttribute(accum_u, 3));
+    geometry.setAttribute("meshcatCrawlJacobianV", new THREE.BufferAttribute(accum_v, 3));
+    return true;
+}
+
+function install_crawling_texture_shader(material, geometry) {
+    if (material === undefined || material === null || geometry === undefined || geometry === null) {
+        return;
+    }
+    if (material.meshcat_crawl_shader_patched) {
+        return;
+    }
+    if (geometry.attributes.meshcatCrawlJacobianU === undefined ||
+        geometry.attributes.meshcatCrawlJacobianV === undefined) {
+        return;
+    }
+    if (material.map === undefined || material.map === null) {
+        return;
+    }
+
+    material.meshcat_crawl_axis = material.meshcat_crawl_axis || new THREE.Vector3(1, 0, 0);
+    material.meshcat_crawl_displacement = material.meshcat_crawl_displacement || 0.0;
+    material.meshcat_crawl_shader_patched = true;
+
+    material.onBeforeCompile = (shader) => {
+        shader.uniforms.meshcatCrawlAxis = { value: material.meshcat_crawl_axis.clone() };
+        shader.uniforms.meshcatCrawlDisplacement = { value: material.meshcat_crawl_displacement };
+        material.meshcat_crawl_shader_uniforms = shader.uniforms;
+
+        shader.vertexShader = `
+attribute vec3 meshcatCrawlJacobianU;
+attribute vec3 meshcatCrawlJacobianV;
+uniform vec3 meshcatCrawlAxis;
+uniform float meshcatCrawlDisplacement;
+varying vec2 meshcatCrawlUvOffset;
+${shader.vertexShader}`;
+
+        shader.vertexShader = shader.vertexShader.replace(
+            "#include <uv_vertex>",
+            `#include <uv_vertex>
+                vec3 meshcatCrawlAxisNormal = normalize(meshcatCrawlAxis);
+                vec3 meshcatFlowDir = cross(meshcatCrawlAxisNormal, normal);
+                vec3 meshcatFlowDirWorld = (modelMatrix * vec4(meshcatFlowDir, 0.0)).xyz;
+                float meshcatCrawlWorldScale = max(length(meshcatFlowDirWorld) / max(length(meshcatFlowDir), 1e-6), 1e-6);
+                vec3 meshcatGeometryDisplacement = (meshcatCrawlDisplacement / meshcatCrawlWorldScale) * meshcatFlowDir;
+                meshcatCrawlUvOffset = vec2(
+                    dot(meshcatCrawlJacobianU, meshcatGeometryDisplacement),
+                    dot(meshcatCrawlJacobianV, meshcatGeometryDisplacement));
+                vec3 homogeneousUvOffset = vec3(meshcatCrawlUvOffset, 0.0);
+                #if defined( USE_UV ) || defined( USE_ANISOTROPY )
+                vUv += meshcatCrawlUvOffset;
+                #endif
+                #ifdef USE_MAP
+                vMapUv += (mapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_ALPHAMAP
+                vAlphaMapUv += (alphaMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_LIGHTMAP
+                vLightMapUv += (lightMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_AOMAP
+                vAoMapUv += (aoMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_BUMPMAP
+                vBumpMapUv += (bumpMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_NORMALMAP
+                vNormalMapUv += (normalMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_DISPLACEMENTMAP
+                vDisplacementMapUv += (displacementMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_EMISSIVEMAP
+                vEmissiveMapUv += (emissiveMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_METALNESSMAP
+                vMetalnessMapUv += (metalnessMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_ROUGHNESSMAP
+                vRoughnessMapUv += (roughnessMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_ANISOTROPYMAP
+                vAnisotropyMapUv += (anisotropyMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_CLEARCOATMAP
+                vClearcoatMapUv += (clearcoatMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_CLEARCOAT_NORMALMAP
+                vClearcoatNormalMapUv += (clearcoatNormalMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_CLEARCOAT_ROUGHNESSMAP
+                vClearcoatRoughnessMapUv += (clearcoatRoughnessMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_IRIDESCENCEMAP
+                vIridescenceMapUv += (iridescenceMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_IRIDESCENCE_THICKNESSMAP
+                vIridescenceThicknessMapUv += (iridescenceThicknessMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_SHEEN_COLORMAP
+                vSheenColorMapUv += (sheenColorMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_SHEEN_ROUGHNESSMAP
+                vSheenRoughnessMapUv += (sheenRoughnessMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_SPECULARMAP
+                vSpecularMapUv += (specularMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_SPECULAR_COLORMAP
+                vSpecularColorMapUv += (specularColorMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_SPECULAR_INTENSITYMAP
+                vSpecularIntensityMapUv += (specularIntensityMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_TRANSMISSIONMAP
+                vTransmissionMapUv += (transmissionMapTransform * homogeneousUvOffset).xy;
+                #endif
+                #ifdef USE_THICKNESSMAP
+                vThicknessMapUv += (thicknessMapTransform * homogeneousUvOffset).xy;
+                #endif`
+        );
+        material.needsUpdate = true;
+    };
+
+    material.onBeforeRender = () => {
+        if (material.meshcat_crawl_shader_uniforms !== undefined) {
+            material.meshcat_crawl_shader_uniforms.meshcatCrawlAxis.value.copy(material.meshcat_crawl_axis);
+            material.meshcat_crawl_shader_uniforms.meshcatCrawlDisplacement.value = material.meshcat_crawl_displacement;
+        }
+    };
+
+    material.customProgramCacheKey = () => "meshcat_crawl_texture_v3";
+    material.needsUpdate = true;
+}
+
+function prepare_crawling_texture(node) {
+    if (node === undefined || node === null) {
+        return;
+    }
+    if (node.isMesh && node.geometry !== undefined) {
+        compute_crawling_texture_jacobians(node.geometry);
+        if (node.material !== undefined) {
+            if (Array.isArray(node.material)) {
+                for (let material of node.material) {
+                    install_crawling_texture_shader(material, node.geometry);
+                }
+            } else {
+                install_crawling_texture_shader(node.material, node.geometry);
+            }
+        }
+    }
+    for (let child of node.children) {
+        prepare_crawling_texture(child);
+    }
+}
+
 function create_default_scene() {
     var scene = new THREE.Scene();
     scene.name = "Scene";
     scene.rotateX(-Math.PI / 2);
     return scene;
 }
-
 
 // https://stackoverflow.com/a/15832662
 function download_data_uri(name, uri) {
@@ -595,11 +1471,12 @@ class Animator {
         folder.add(this, "pause");
         folder.add(this, "reset");
 
-        // Note, for some reason when you call `.max()` on a slider controller it does
-        // correctly change how the slider behaves but does not change the range of values
-        // that can be entered into the text box attached to the slider. Oh well. We work
-        // around this by creating the slider with an unreasonably huge range and then calling
-        // `.min()` and `.max()` on it later.
+        // Note, for some reason when you call `.max()` on a slider controller
+        // it does correctly change how the slider behaves but does not change
+        // the range of values that can be entered into the text box attached
+        // to the slider. Oh well. We work around this by creating the slider
+        // with an unreasonably huge range and then calling `.min()` and
+        // `.max()` on it later.
         this.time_scrubber = folder.add(this, "time", 0, 1e9, 0.001);
         this.time_scrubber.onChange((value) => this.seek(value));
 
@@ -677,42 +1554,163 @@ class Animator {
     }
 }
 
-// Generates a gradient texture without filling up
-// an entire canvas. We simply create a 2x1 image
-// containing only the two colored pixels and then
-// set up the appropriate magnification and wrapping
-// modes to generate the gradient automatically
-function gradient_texture(top_color, bottom_color) {
-    let colors = [bottom_color, top_color];
-
-    let width = 1;
+// Generates a gradient texture for defining the environment.
+// Because it's a linear gradient, we can rely on OpenGL to do the
+// linear interpolation between two rows of colors. However, to
+// serve as an environment texture for objects with PBR shaders,
+// it needs to be at least 64-pixels wide. We have been unable to
+// find supporting documentation for this requirement, but
+// empirically, it is obvious. Reduce the width by even one pixel
+// and any metallic surface reflects a black void.
+function make_gradient_texture(top_color, bottom_color, is_perspective) {
+    if (top_color == null || bottom_color == null) return null;
+    let width = 64;
     let height = 2;
     let size = width * height;
-    var data = new Uint8Array(3 * size);
-    for (let row = 0; row < height; row++) {
-        let color = colors[row];
-        for (let col = 0; col < width; col++) {
-            let i = 3 * (row * width + col);
-            for (let j = 0; j < 3; j++) {
-                data[i + j] = color[j];
-            }
+    let data = new Uint8Array(4 * size);
+    // Row 0 is all bottom; row 1 is all top.
+    let i = 0;
+    let j = width * 4;
+    for (let c = 0; c < width; ++c) {
+        for (let ch = 0; ch < 3; ++ch) {
+            data[i + ch] = bottom_color[ch];
+            data[j + ch] = top_color[ch];
         }
+        data[i + 3] = 255;
+        data[j + 3] = 255;
+        i += 4;
+        j += 4;
     }
-    var texture = new THREE.DataTexture(data, width, height, THREE.RGBFormat);
-    texture.magFilter = THREE.LinearFilter;
-    texture.encoding = THREE.LinearEncoding;
-    // By default, the points in our texture map to the center of
-    // the pixels, which means that the gradient only occupies
-    // the middle half of the screen. To get around that, we just have
-    // to tweak the UV transform matrix
-    texture.matrixAutoUpdate = false;
-    texture.matrix.set(0.5, 0, 0.25,
-        0, 0.5, 0.25,
-        0, 0, 1);
-    texture.needsUpdate = true
+
+    // When we are using an orthographic camera, we can't use environment
+    // mapping. It must be UVMapping so it covers the screen.
+    let mapping = is_perspective ? THREE.EquirectangularReflectionMapping :
+                                   THREE.UVMapping;
+    let texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat,
+                                        THREE.UnsignedByteType, mapping,
+                                        THREE.RepeatWrapping, THREE.ClampToEdgeWrapping,
+                                        THREE.LinearFilter, THREE.LinearFilter, 1,
+                                        THREE.SRGBColorSpace);
+    if (!is_perspective) {
+        // By default, the points in our texture map to the center of
+        // the pixels, which means that the gradient only occupies
+        // the middle half of the screen. To get around that, we just have
+        // to tweak the UV transform matrix
+        texture.matrixAutoUpdate = false;
+        texture.matrix.set(0.5, 0, 0.25,
+            0, 0.5, 0.25,
+            0, 0, 1);
+        texture.needsUpdate = true
+    }
+    texture.needsUpdate = true;
     return texture;
 }
 
+// Loads a new environment map (from the given url).
+// @pre The url actually represents a change from whatever environment map (if
+// any) is currently loaded.)
+// TODO(SeanCurtis-TRI): This should only be called by background.update().
+//   Refactor this so that requirement is more strongly enforced.
+function load_env_texture(background, scene, on_background_done) {
+    // The environment map can be either a high-dynamic range (HDR) image or a
+    // normalized color image (aka low-dynamic range, LDR) image. THREE.js
+    // offers separate mechanisms for handling the two types and the parsed
+    // results require slightly different preparation before being passed to
+    // the scene.
+    //
+    // As we can't rely on the URL to inform of us of which flavor image it is
+    // (HDR or LDR), we'll simply throw both parsers at it and accept the
+    // successful result. The LDR parser (TextureLoader) is used as our entry
+    // point because its implementation handles failure more gracefully.
+
+    // This is the *requested* environment map, but not yet confirmed.
+    let url = background.environment_map;
+
+    // Action we take on successfully loading a texture (HDR or LDR).
+    let on_load_common = (texture) => {
+        background.set_environment_texture(url, texture, scene);
+        on_background_done();
+    };
+
+    // Actions to be taken on successfully loading a specific flavor.
+    let on_load_hdr = (texture) => {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        on_load_common(texture);
+    };
+
+    let on_load_ldr = (texture) => {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        texture.colorSpace = THREE.LinearSRGBColorSpace;
+        on_load_common(texture);
+    }
+
+    // If we fail to load the HDR version, we report failure.
+    let on_ultimate_failure = () => {
+        console.error(
+            `Failure to load the requested environment map '${url}'; reverting to none.`);
+        background.set_environment_texture(/* url= */ null, /* texture= */ null,
+                                           scene);
+        on_background_done();
+    };
+
+    // If we fail to load the LDR version, try it as an HDR image.
+    let ldr_load_fail = () => {
+        new RGBELoader().load(
+            url,
+            (texture) => {
+                texture.mapping = THREE.EquirectangularReflectionMapping;
+                on_load_common(texture);
+            },
+            undefined,
+            hdr_load_fail);
+    };
+
+    // Try loading the LDR version first. THREE.TextureLoader is far more robust
+    // to failure than RGBELoader. So, we'll give it a chance to fail first.
+    new THREE.TextureLoader().load(
+        url,
+        on_load_ldr,
+        /* onProgress = */ undefined,
+        /* onError = */ () => {
+            new RGBELoader().load(
+                url,
+                on_load_hdr,
+                /* onProgress = */ undefined,
+                /* onError = */ on_ultimate_failure);
+        });
+
+}
+
+// Utility function for waiting on the definition of an DOM element's child
+// property. Given the element object and the name of the child property
+// it will detect when it is *not* null and satisfies the given predicate.
+// E.g., we can use this to wait until the value this.xr_button.textContent
+// has been initialized by three.js. target_node = this.xr_button,
+// property = "textContent", and the predicate tests for non-zero length.
+function wait_for_property(target_node, property, predicate) {
+    return new Promise(resolve => {
+        const callback = () => {
+            // We won't test the observes mutation, we'll simply use the fact
+            // of the mutation to test the desired property directly.
+            var prop_object = target_node[property];
+            if (prop_object != null && predicate(prop_object)) {
+                observer.disconnect();
+                resolve();
+            }
+        };
+
+        const observer = new MutationObserver(callback);
+        observer.observe(target_node, { childList: true });
+
+        // Just in case we have a race condition and it changed between the
+        // invocation of this function and the dispatch of the observer.
+        var prop_object = target_node[property];
+        if (prop_object != null && predicate(prop_object)) {
+            observer.disconnect();
+            return resolve();
+        }
+    });
+}
 
 class Viewer {
     constructor(dom_element, animate, renderer) {
@@ -726,9 +1724,13 @@ class Viewer {
             this.renderer = renderer;
         }
         this.renderer.setPixelRatio(window.devicePixelRatio);
-
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.webxr_session_active = false;
+        this.xr_button = null;
         this.scene = create_default_scene();
         this.gui_controllers = {};
+        this.keydown_callbacks = {};
+        this.render_callback = () => {};
         this.create_scene_tree();
 
         this.add_default_scene_elements();
@@ -737,9 +1739,14 @@ class Viewer {
         this.create_camera();
         this.num_messages_received = 0;
 
+        this.draco_loader = new DRACOLoader(meshcat_loading_manager);
+        this.ktx2_loader = new KTX2Loader(meshcat_loading_manager);
+        this.ktx2_loader.detectSupport(this.renderer);
+
         // TODO: probably shouldn't be directly accessing window?
         window.onload = (evt) => this.set_3d_pane_size();
         window.addEventListener('resize', (evt) => this.set_3d_pane_size(), false);
+        window.addEventListener('keydown', (evt) => {this.on_keydown(evt);});
 
         requestAnimationFrame(() => this.set_3d_pane_size());
         if (animate || animate === undefined) {
@@ -747,17 +1754,33 @@ class Viewer {
         }
     }
 
+    on_keydown(e) {
+      if (e.code in this.keydown_callbacks) {
+        for (const o of this.keydown_callbacks[e.code]) {
+          o["callback"](e);
+        }
+      }
+    }
+
+    update_background() {
+        let bg_parent = this.scene_tree.find(["Background"]);
+        let bg = this.scene_tree.find(["Background", "<object>"]);
+        let is_visible = bg_parent.object.visible && bg.object.visible;
+        bg.object.update(this.scene, is_visible, this.is_perspective(),
+                         /* on_background_done= */ () => { this.set_dirty(); });
+    }
+
+    is_perspective() {
+        return this.camera && this.camera.isPerspectiveCamera;
+    }
+
     hide_background() {
-        this.scene.background = null;
-        this.set_dirty();
+        this.set_property(["Background"], "visible", false);
     }
 
     show_background() {
-        var top_color = this.scene_tree.find(["Background"]).object.top_color;
-        var bottom_color =
-            this.scene_tree.find(["Background"]).object.bottom_color;
-        this.scene.background = gradient_texture(top_color, bottom_color);
-        this.set_dirty();
+        this.set_property(["Background"], "visible", true);
+        this.set_property(["Background", "<object>"], "visible", true);
     }
 
     set_dirty() {
@@ -776,8 +1799,20 @@ class Viewer {
         camera.position.set(3, 1, 0);
     }
 
+    upgrade_intensity(legacy_intensity) {
+        // When we upgraded three.js from 0.149 to 0.156 we inherited a host of
+        // changes to lighting. See
+        // https://discourse.threejs.org/t/updates-to-lighting-in-three-js-r155/53733
+        // We're taking the old legacy values (which are *not* physical) and
+        // simply scaling them to be *functionally* equivalent as advised above.
+        // For point and spot lights this is insufficient. Those lights decay
+        // and will not be physically correct.
+        return legacy_intensity * Math.PI;
+    }
+
     create_default_spot_light() {
-        var spot_light = new THREE.SpotLight(0xffffff, 0.8);
+        var spot_light = new THREE.SpotLight(0xffffff,
+                                             this.upgrade_intensity(0.8));
         spot_light.position.set(1.5, 1.5, 2);
         // Make light not cast shadows by default (effectively
         // disabling them, as there are no shadow-casting light
@@ -799,7 +1834,8 @@ class Viewer {
         // it's primarily used for casting detailed shadows
         this.set_property(["Lights", "SpotLight"], "visible", false);
 
-        var point_light_px = new THREE.PointLight(0xffffff, 0.4);
+        var point_light_px = new THREE.PointLight(0xffffff,
+                                                  this.upgrade_intensity(0.4));
         point_light_px.position.set(1.5, 1.5, 2);
         point_light_px.castShadow = false;
         point_light_px.distance = 10.0;
@@ -810,7 +1846,8 @@ class Viewer {
         point_light_px.shadow.bias = -0.001;      // Default 0
         this.set_object(["Lights", "PointLightNegativeX"], point_light_px);
 
-        var point_light_nx = new THREE.PointLight(0xffffff, 0.4);
+        var point_light_nx = new THREE.PointLight(0xffffff,
+                                                  this.upgrade_intensity(0.4));
         point_light_nx.position.set(-1.5, -1.5, 2);
         point_light_nx.castShadow = false;
         point_light_nx.distance = 10.0;
@@ -821,11 +1858,13 @@ class Viewer {
         point_light_nx.shadow.bias = -0.001;      // Default 0
         this.set_object(["Lights", "PointLightPositiveX"], point_light_nx);
 
-        var ambient_light = new THREE.AmbientLight(0xffffff, 0.3);
+        var ambient_light = new THREE.AmbientLight(0xffffff,
+                                                   this.upgrade_intensity(0.3));
         ambient_light.intensity = 0.6;
         this.set_object(["Lights", "AmbientLight"], ambient_light);
 
-        var fill_light = new THREE.DirectionalLight(0xffffff, 0.4);
+        var fill_light = new THREE.DirectionalLight(0xffffff,
+                                                    this.upgrade_intensity(0.4));
         fill_light.position.set(-10, -10, 0);
         this.set_object(["Lights", "FillLight"], fill_light);
 
@@ -843,7 +1882,8 @@ class Viewer {
             this.gui.destroy();
         }
         this.gui = new dat.GUI({
-            autoPlace: false
+            autoPlace: false,
+            resizable: true
         });
         this.dom_element.parentElement.appendChild(this.gui.domElement);
         this.gui.domElement.style.position = "absolute";
@@ -859,17 +1899,34 @@ class Viewer {
         this.animator = new Animator(this);
         this.gui.close();
 
-        this.set_property(["Background"],
-            "top_color", [135/255, 206/255, 250/255]); // lightskyblue
-        this.set_property(["Background"],
-            "bottom_color", [25/255, 25/255, 112/255]); // midnightblue
-        this.scene_tree.find(["Background"]).on_update = () => {
-            if (this.scene_tree.find(["Background"]).object.visible)
-                this.show_background();
-            else
-                this.hide_background();
+        this.set_object(["Background"], new Background());
+        // Set the callbacks on "/Background" and "/Background/<object>" so that
+        // toggling either path's visibility will affect the rendering.
+        let bg_folder = this.scene_tree.find(["Background"]);
+        // In SceneNode::set_property, we detect if a property of the background
+        // has been set and call the callback. This makes changing the
+        // visibility of the folder behave like the visibility of its <object>.
+        bg_folder.object.isBackground = true;
+        bg_folder.on_update = () => {
+            this.update_background();
         };
-        this.show_background();
+        this.scene_tree.find(["Background", "<object>"]).on_update = () => {
+            this.update_background();
+        }
+        this.update_background();
+
+        this.set_object(["Render Settings"], new RenderConfig());
+        let settings_node = this.scene_tree.find(["Render Settings", "<object>"]);
+        settings_node.on_update = () => {
+            this.renderer.toneMappingExposure = settings_node.object.exposure;
+            this.set_dirty();
+        };
+        settings_node.object.on_update = () => {
+            // When setting the property directly, simulate setting the GUI.
+            // That is responsible for configuring the renderer and triggering a
+            // redraw.
+            settings_node.on_update();
+        };
     }
 
     set_3d_pane_size(w, h) {
@@ -892,6 +1949,7 @@ class Viewer {
     render() {
         this.controls.update();
         this.camera.updateProjectionMatrix();
+        this.render_callback();
         this.renderer.render(this.scene, this.camera);
         this.animator.after_render();
         this.needs_render = false;
@@ -920,16 +1978,27 @@ class Viewer {
     }
 
     set_camera(obj) {
+        if (this.webxr_session_active) {
+            console.warn("Can't set camera during an active WebXR session.");
+            return;
+        }
+
         this.camera = obj;
         this.controls = new OrbitControls(obj, this.dom_element);
         this.controls.enableKeys = false;
-        this.controls.screenSpacePanning = true;  // see https://github.com/rdeits/MeshCat.jl/issues/132
         this.controls.addEventListener('start', () => {
             this.set_dirty()
         });
         this.controls.addEventListener('change', () => {
-            this.set_dirty()
+            this.set_dirty();
         });
+        this.update_webxr_buttons();
+        this.update_background()
+    }
+
+    set_render_callback(callback) {
+        var my_callback = eval(callback);
+        this.render_callback = my_callback == null ? () => {} : my_callback;
     }
 
     set_camera_target(value) {
@@ -947,27 +2016,108 @@ class Viewer {
         this.scene_tree.find(path).set_transform(matrix);
     }
 
+    // Given a path, returns the *container* node associated with that path.
+    // For a path like ["foo", "bar"], this is idempotent. But when the path is
+    // to a *renderable* node ["foo", "bar", "<object>"], this returns the path
+    // to the parent container node.
+    normalize_set_object_path(path) {
+        if (path.length > 0 && path[path.length - 1] === "<object>") {
+            return path.slice(0, path.length - 1);
+        }
+        return path;
+    }
+
     set_object(path, object) {
+        path = this.normalize_set_object_path(path);
         this.scene_tree.find(path.concat(["<object>"])).set_object(object);
     }
 
     set_object_from_json(path, object_json) {
-        let loader = new ExtensibleObjectLoader();
-        loader.onTextureLoad = () => {this.set_dirty();}
-        loader.parse(object_json, (obj) => {
-            if (obj.geometry !== undefined && obj.geometry.type == "BufferGeometry") {
-                if ((obj.geometry.attributes.normal === undefined) || obj.geometry.attributes.normal.count === 0) {
-                    obj.geometry.computeVertexNormals();
-                }
-            } else if (obj.type.includes("Camera")) {
-                this.set_camera(obj);
-                this.set_3d_pane_size();                
+        path = this.normalize_set_object_path(path);
+        // Ensure async object loads have a placeholder node that can queue
+        // direct /.../<object> set_property() commands until parsing finishes.
+        let object_node = this.scene_tree.find(path.concat(["<object>"]));
+        // The object node is a placeholder until the json is fully processed.
+        // We mark it as such by setting the pending_properties to an Object.
+        // When the object is actually instantiated, the placeholder will get
+        // replaced.
+        object_node.pending_properties = {};
+
+        // Recursively walk the tree rooted at node and enable shadows for all
+        // Mesh nodes.
+        let meshes_cast_shadows = (node) => {
+            if (node.type === "Mesh") {
+                node.castShadow = true;
+                node.receiveShadow = true;
             }
-            obj.castShadow = true;
-            obj.receiveShadow = true;
+            for (let i = 0; i < node.children.length; ++i) {
+                meshes_cast_shadows(node.children[i]);
+            }
+        };
+        // Update Line2 material resolutions
+        let update_line2_resolution = (node) => {
+            if (node.isLine2 && node.material && node.material.resolution) {
+                node.material.resolution.set(this.renderer.domElement.width, this.renderer.domElement.height);
+            }
+            for (let i = 0; i < node.children.length; ++i) {
+                update_line2_resolution(node.children[i]);
+            }
+        };
+        let configure_obj = (obj) => {
+            meshes_cast_shadows(obj);
+            update_line2_resolution(obj);
             this.set_object(path, obj);
             this.set_dirty();
-        });
+        };
+        if (object_json.object.type == "_meshfile_object" && object_json.object.format == "gltf") {
+            let loader = new GLTFLoader();
+            loader.setDRACOLoader(this.draco_loader);
+            loader.setKTX2Loader(this.ktx2_loader);
+            loader.parse(object_json.object.data, null, (gltf) => {
+                let scene = gltf.scene;
+                if (scene === null) {
+                    // TODO(SeanCurtis-TRI): What do I do in this case?
+                    console.error("Gltf parsed with no scene!");
+                } else {
+                    let json = object_json.object;
+                    if (json.matrix !== undefined) {
+                        // The GLTFLoader doesn't swap from y-up to z-up. So, we'll do that here.
+                        scene.matrix.fromArray(json.matrix);
+                        let R = new THREE.Matrix4();
+                        R = R.makeRotationX(Math.PI / 2);
+                        // The y-up to z-up rotation should happen on the right to precondition the z-up pose stored in json.matrix.
+                        scene.matrix.multiply(R);
+                        if (json.matrixAutoUpdate !== undefined) scene.matrixAutoUpdate = json.matrixAutoUpdate;
+                        if (scene.matrixAutoUpdate) scene.matrix.decompose(scene.position, scene.quaternion, scene.scale);
+
+                        // TODO(SeanCurtis-TRI): ExtensibleObjectLoader::parseObject()
+                        // does more operations on the resultant meshfile object
+                        // than just the objects matrix. It also plays with
+                        // various other render settings. They should be applied
+                        // to objects loaded from .glTF. The application act
+                        // may be more complex for configurations that aren't
+                        // inherited by scene node children; they would have
+                        // to be applied around the tree rooted at the visualized
+                        // scene group.
+                    }
+                    configure_obj(scene);
+                }
+            });
+        } else {
+            let loader = new ExtensibleObjectLoader();
+            loader.onTextureLoad = () => { this.set_dirty(); }
+            loader.parse(object_json, (obj) => {
+                if (obj.geometry !== undefined && obj.geometry.type == "BufferGeometry") {
+                    if ((obj.geometry.attributes.normal === undefined) || obj.geometry.attributes.normal.count === 0) {
+                        obj.geometry.computeVertexNormals();
+                    }
+                } else if (obj.type.includes("Camera")) {
+                    this.set_camera(obj);
+                    this.set_3d_pane_size();
+                }
+                configure_obj(obj);
+            });
+        }
     }
 
     delete_path(path) {
@@ -979,11 +2129,14 @@ class Viewer {
     }
 
     set_property(path, property, value) {
-        this.scene_tree.find(path).set_property(property, value);
-        if (path[0] === "Background") {
-            // The background is not an Object3d, so needs a little help.
-            this.scene_tree.find(path).on_update();
+        if (path.length === 1 && path[0] === "Background" && property !== "visible") {
+            console.warn('To set the Background property ' + property +
+                         ', use the path "/Background/<object>" instead of just "/Background".');
+            // We need to forward setting properties on Background to
+            // Background/<object>.
+            path = [path[0], "<object>"];
         }
+        this.scene_tree.find(path).set_property(property, value, path);
         // if (path[0] === "Cameras") {
         //     this.camera.updateProjectionMatrix();
         // }
@@ -994,29 +2147,63 @@ class Viewer {
         this.animator.load(animations, options);
     }
 
-    set_control(name, callback, value, min, max, step) {
+    // keycode1 and keycode2 are the KeyboardEvent.code values, e.g. "KeyB",
+    // https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/Keyboard_event_code_values
+    // Buttons have at most one keycode assigned to them (which causes the
+    // button to callback to fire).  Sliders have two keycodes assigned to
+    // them; one to decrease the value by step, the other to increase it.
+    set_control(name, callback, value, min, max, step,
+                keycode1, keycode2) {
+        let my_callback = eval(callback);
         let handler = {};
         if (name in this.gui_controllers) {
             this.gui.remove(this.gui_controllers[name]);
         }
         if (value !== undefined) {
-            handler[name] = value;
+          handler[name] = value;
             this.gui_controllers[name] = this.gui.add(
                 handler, name, min, max, step);
-            this.gui_controllers[name].onChange(eval(callback));
+            this.gui_controllers[name].onChange(my_callback);
+            function add_callback(viewer, keycode, increment) {
+              if (keycode != undefined) {
+                let keydown_callback = {name: name, callback: () => {
+                  // Decrease value by step (within limits), and trigger
+                  // callback.
+                  value = viewer.gui_controllers[name].getValue();
+                  let new_value =
+                    Math.min(Math.max(value + increment, min), max);
+                  viewer.gui_controllers[name].setValue(new_value);
+                }};
+                if (keycode in viewer.keydown_callbacks) {
+                  viewer.keydown_callbacks[keycode].push(keydown_callback);
+                } else {
+                  viewer.keydown_callbacks[keycode] = [keydown_callback];
+                }
+              }
+            }
+            add_callback(this, keycode1, -step);
+            add_callback(this, keycode2, +step);
         } else {
-            handler[name] = eval(callback);
+            handler[name] = my_callback;
             this.gui_controllers[name] = this.gui.add(handler, name);
             // The default layout for dat.GUI buttons is broken, with the button name artificially truncated at the same width that slider names are truncated.  We fix that here.
             this.gui_controllers[name].domElement.parentElement.querySelector('.property-name').style.width="100%";
+            if (keycode1 != undefined) {
+              let keydown_callback = {name: name, callback: my_callback};
+              if (keycode1 in this.keydown_callbacks) {
+                this.keydown_callbacks[keycode1].push(keydown_callback);
+              } else {
+                this.keydown_callbacks[keycode1] = [keydown_callback];
+              }
+            }
         }
     }
 
     set_control_value(name, value, invoke_callback=true) {
-        if (name in this.gui_controllers && this.gui_controllers[name] 
+        if (name in this.gui_controllers && this.gui_controllers[name]
             instanceof dat.controllers.NumberController) {
             if (invoke_callback) {
-              this.gui_controllers[name].setValue(value);              
+              this.gui_controllers[name].setValue(value);
             } else {
               this.gui_controllers[name].object[name] = value;
               this.gui_controllers[name].updateDisplay();
@@ -1028,6 +2215,15 @@ class Viewer {
         if (name in this.gui_controllers) {
             this.gui.remove(this.gui_controllers[name]);
             delete this.gui_controllers[name];
+        }
+        // Remove any callbacks associated with this name.
+        for (let code in this.keydown_callbacks) {
+          let i=this.keydown_callbacks[code].length;
+          while (i--) {
+            if (this.keydown_callbacks[code][i]["name"] == name) {
+              this.keydown_callbacks[code].splice(i, 1);
+            }
+          }
         }
     }
 
@@ -1052,7 +2248,7 @@ class Viewer {
         } else if (cmd.type == "set_target") {
             this.set_camera_target(cmd.value);
         } else if (cmd.type == "set_control") {
-            this.set_control(cmd.name, cmd.callback, cmd.value, cmd.min, cmd.max, cmd.step);
+            this.set_control(cmd.name, cmd.callback, cmd.value, cmd.min, cmd.max, cmd.step, cmd.keycode1, cmd.keycode2);
         } else if (cmd.type == "set_control_value") {
             this.set_control_value(cmd.name, cmd.value, cmd.invoke_callback);
         } else if (cmd.type == "delete_control") {
@@ -1069,18 +2265,30 @@ class Viewer {
             }));
         } else if (cmd.type == "save_image") {
             this.save_image()
+        } else if (cmd.type == "enable_webxr") {
+            this.enable_webxr(cmd.mode);
+        } else if (cmd.type == "visualize_vr_controller"){
+            this.visualize_vr_controllers();
+        } else if (cmd.type == "set_render_callback") {
+            this.set_render_callback(cmd.callback);
         }
+
         this.set_dirty();
     }
 
-    handle_command_bytearray(bytearray) {
-        let decoded = msgpack.decode(bytearray);
-        this.handle_command(decoded);
+    decode(message) {
+      return msgpack.decode(new Uint8Array(message.data), { extensionCodec });
     }
-    
+
+    handle_command_bytearray(bytearray) {
+      let decoded = msgpack.decode(bytearray, {extensionCodec});
+      this.handle_command(decoded);
+    }
+
     handle_command_message(message) {
-        this.num_messages_received++;
-        this.handle_command_bytearray(new Uint8Array(message.data));
+      this.num_messages_received++;
+      let decoded = this.decode(message);
+      this.handle_command(decoded);
     }
 
     connect(url) {
@@ -1146,6 +2354,176 @@ class Viewer {
         input.click();
         input.remove();
     }
+
+    update_webxr_buttons(){
+        const xrButton = document.getElementById('XRButton');
+        const vrButton = document.getElementById('VRButton');
+        const button = xrButton || vrButton;
+
+        // If we have no button defined or the button label hasn't been defined
+        // yet, we have no work to do.
+        if (button == null ||
+            button.textContent == null ||
+            button.textContent.length == 0) {
+            return;
+        }
+
+        // If original_content has a value, we've already cached the
+        // original values and we won't do it again.
+        if (button.original_content == null) {
+            button.original_content = button.textContent;
+            button.original_disabled = button.disabled;
+        }
+        if (this.is_perspective()) {
+            // There's only work to do if we've got cached values.
+            if (button.original_content != null) {
+                button.textContent = button.original_content
+                button.disabled = button.original_disabled
+                // Upon restoring the cached values, clear the cache.
+                button.original_content = null;
+                button.original_disabled = null;
+            }
+        } else {
+            button.disabled = true;
+            button.textContent = "AR/VR Disabled for Orthographic Cameras";
+        }
+    }
+
+    // Adds controllers to the VR/XR scene.
+    // TODO(WawasCode): Create a VR UI.
+    visualize_vr_controllers() {
+        const controllerModelFactory = new XRControllerModelFactory();
+
+        const pointing_ray_vectors = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(0, 0, -1)
+        ]);
+
+        const pointing_ray = new THREE.Line(pointing_ray_vectors);
+        pointing_ray.scale.z = 5;  // Limit the length of the ray.
+
+        const controllers = [];
+        // Loop through all controllers. If there are fewer than 2 Controllers
+        // it gets handled by XRControllerModelFactory in the background.
+        for (let i = 0; i < 2; i++) {
+            const controller = this.renderer.xr.getController(i);
+            controller.add(pointing_ray.clone());
+
+            // Create a wrapper group for the controller
+            // and undo the rotation since
+            // the world is rotate by -90° around x.
+            const controllerWrapper = new THREE.Group();
+            controllerWrapper.rotation.x = Math.PI / 2;
+            controllerWrapper.add(controller);
+            this.scene.add(controllerWrapper);
+            controllers.push(controllerWrapper);
+
+            const grip = this.renderer.xr.getControllerGrip(i);
+            // Undo the rotation of the grip.
+            const gripWrapper = new THREE.Group();
+            gripWrapper.rotation.x = Math.PI / 2;
+            gripWrapper.add(grip);
+            this.scene.add(gripWrapper);
+
+            const model = controllerModelFactory.createControllerModel(grip);
+            grip.add(model);
+        }
+
+        return controllers;
+    }
+
+    // Enables webXR and all its functionalities.
+    // If mode == "vr", then we enable the VRButton.
+    // If mode == "ar", then we enable the XRButton.
+    // All other strings report an error.
+    // When in XR/VR mode the meshcat controls are disabled.
+    enable_webxr(mode = "ar") {
+        if (this.renderer.xr.enabled) {
+            console.warn("WebXR/VR has already been enabled.");
+            return;
+        }
+        if (mode == "vr") {
+            this.xr_button = VRButton.createButton(this.renderer);
+        } else if (mode == "ar") {
+            this.xr_button = XRButton.createButton(this.renderer);
+        } else {
+            console.error(
+                `enable_webxr takes either "ar" or "vr" as arguments. Given "${mode}".`);
+            return;
+        }
+        this.renderer.xr.enabled = true;
+
+        document.body.appendChild(this.xr_button);
+        wait_for_property(this.xr_button, "textContent",
+                          (value) => { return value.length > 0; }).then(() => {
+                             this.update_webxr_buttons(); });
+
+        var original_update_projection_matrix = null;
+        this.renderer.xr.addEventListener('sessionstart', () => {
+            original_update_projection_matrix = this.camera.updateProjectionMatrix;
+            /* When the current session starts, we want the VR camera at the
+             position of the scene's camera but not exactly the same rotation.
+             We want it pointing along the same heading, but if the headset
+             is level, the camera should be looking in a direction parallel with
+             the world ground plane.
+
+             If the user has positioned the camera so it is looking up or down
+             at a significant angle, after switching to VR/AR mode, the user
+             will have to tilt their head up/down a comparable angle to
+             reproduce the equivalent view. */
+            /*
+            Note: Requesting an "AR" session does not guarantee an AR session will be initiated.
+            The request could automatically devolve to a VR session if AR isn’t fully supported on the system,
+            but VR is. There's potential for a discrepancy between the requested and the actual mode.
+            */
+            if (mode == "ar"){
+                this.set_property(["Background"], "use_ar_background", true);
+            }
+            this.webxr_session_active = true;
+            console.info("Immersive session starting, controls are being removed.")
+            this.renderer.xr.getSession().requestReferenceSpace("local")
+                                         .then((refSpace) => {
+                let Cz_W = new THREE.Vector3();
+                Cz_W.setFromMatrixColumn(this.camera.matrixWorld, 2);
+                if (Math.abs(Cz_W.y) > 0.5) {
+                    console.warn("The view camera was pointed up or down a " +
+                                 "significant amount when entering XR mode. " +
+                                 "Tilt the headset the same amount to see " +
+                                 "the camera's original target.");
+                }
+                let heading_W = new THREE.Vector3(Cz_W.x, 0, Cz_W.z);
+                heading_W.normalize();
+                let Wz = new THREE.Vector3(0, 0, 1);
+                let quat_CW = new THREE.Quaternion();
+                quat_CW.setFromUnitVectors(heading_W, Wz);
+
+                /* This gets *initialized* as p_CW_W, we'll rotate it in place
+                 to make it *truly* p_CW_C. */
+                const p_CW_C = this.camera.position.clone().negate();
+                p_CW_C.applyQuaternion(quat_CW);
+
+                let transform = new XRRigidTransform(p_CW_C, quat_CW);
+                this.renderer.xr.setReferenceSpace(
+                    refSpace.getOffsetReferenceSpace(transform));
+            });
+
+            this.camera.updateProjectionMatrix = () => {
+                console.warn("Updating the camera projection matrix is disallowed in immersive mode.");
+            };
+            this.renderer.setAnimationLoop(() => {
+                this.renderer.render(this.scene, this.camera);
+            });
+        });
+
+        this.renderer.xr.addEventListener('sessionend', () => {
+            this.webxr_session_active = false;
+            if (mode == "ar"){
+                this.set_property(["Background"], "use_ar_background", false);
+            }
+            this.renderer.setAnimationLoop(null); // Reset the animation loop to its default state (null).
+            this.camera.updateProjectionMatrix = original_update_projection_matrix;
+        });
+    }
 }
 
 function split_path(path_str) {
@@ -1174,4 +2552,4 @@ style.sheet.insertRule(`
         padding: 0 0 0 0px;
     }`);
 
-export { Viewer, THREE };
+export { Viewer, THREE, msgpack, Line2, LineMaterial, LineGeometry, Stats };

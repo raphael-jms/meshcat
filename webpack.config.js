@@ -6,7 +6,6 @@ module.exports = [{
         library: "MeshCat",
         libraryTarget: 'umd'
     },
-    watch: true,
     mode: "development",
     devtool: "eval-cheap-source-map"
 }, {
@@ -16,11 +15,21 @@ module.exports = [{
         library: "MeshCat",
         libraryTarget: 'umd'
     },
-    watch: true,
     mode: "production",
+    module: {
+      rules: [
+        {
+          test: /\/libs\/(basis|draco)\//,
+          type: 'asset/inline'
+        }
+      ]
+    },
     plugins: [
       new LicensePlugin({
-        outputFilename: "main.min.js.THIRD_PARTY_LICENSES.json"
-    })
+        outputFilename: "main.min.js.THIRD_PARTY_LICENSES.json",
+        licenseOverrides: {
+          'wwobjloader2@6.2.1': 'MIT',
+        }
+      })
     ],
 }];
